@@ -1,0 +1,33 @@
+# CMake 构建产物
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+
+# IDE 本地配置
+.idea/
+.vscode/
+
+# Python 虚拟环境和缓存
+yolo-env/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 编译产物
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+*.a
+*.lib
+
+# 模型权重
+*.onnx
+*.pt
+
+# 系统文件
+.DS_Store
+Thumbs.db

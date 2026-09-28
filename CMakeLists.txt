@@ -9,6 +9,14 @@ find_package(OpenCV REQUIRED)
 
 add_executable(ai-camera
         src/main.cpp
+        src/YoloDetector.cpp
+        src/CameraAnalyzer.cpp
 )
 
-target_link_libraries(ai-camera PRIVATE ${OpenCV_LIBS})
+target_include_directories(ai-camera PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(ai-camera PRIVATE
+        ${OpenCV_LIBS}
+)

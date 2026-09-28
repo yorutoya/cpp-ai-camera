@@ -1,68 +1,201 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 #include <chrono>
+#include "YoloDetector.hpp"
+#include <map>
+#include "CameraAnalyzer.hpp"
 
 int main()
 {
-    std::cout << "OpenCV version: " << CV_MAJOR_VERSION << "." << CV_MINOR_VERSION << std::endl;
+    try
+    {
+        YoloDetector detector(
+            "models/yolo11n.onnx"
+        );
+        CameraAnalyzer analyzer;
 
-    cv::VideoCapture camera(0);
+        cv::VideoCapture camera(0);
 
-    if (!camera.isOpened()) {
-        std::cerr << "Error: Cannot open camera." << std::endl;
-        return 1;
-    }
-
-    cv::Mat frame;
-
-    auto previousTime = std::chrono::steady_clock::now();
-
-    while (true) {
-        camera >> frame;
-
-        if (frame.empty()) {
-            std::cerr << "Error: Empty frame." << std::endl;
-            break;
+        if (!camera.isOpened())
+        {
+            std::cerr << "Cannot open camera." << std::endl;
+            return 1;
         }
 
-        //Calculate FPS
-        auto currentTime = std::chrono::steady_clock::now();
-        double elapsedTime = std::chrono::duration<double>(currentTime - previousTime).count();
-        double fps = 1.0 / elapsedTime;
-        previousTime = currentTime;
+        const std::string windowName = "AI Camera";
 
-        // Draw FPS
-        std::string fpsText = "FPS: " + std::to_string(static_cast<int>(fps));
-        cv::putText(
-            frame,
-            fpsText,
-            cv::Point(20,40),
-            cv::FONT_HERSHEY_SIMPLEX,
-            1.0,
-            cv::Scalar(0, 255, 0),
-            2
+        cv::namedWindow(
+            windowName,
+            cv::WINDOW_AUTOSIZE
         );
 
-        cv::imshow("AI Camera", frame);
+        cv::Mat frame;
 
-        int key = cv::waitKey(1);
+        auto previousTime = std::chrono::steady_clock::now();
+        double fps = 0.0;
 
-        //Use keyboard to quit
-        if (key == 'q' || key == 'Q' || key == 27) {
-            break;
+        while (true) {
+            camera >> frame;
+
+            if (frame.empty())
+            {
+                break;
+            }
+
+            // AI detection
+            std::vector<Detection> detections = detector.detect(frame);
+            AnalysisResult analysis = analyzer.analyze(detections);
+
+            for (const Detection& detection : detections) {
+                cv::rectangle(
+                    frame,
+                    detection.box,
+                    cv::Scalar(0, 255, 0),
+                    2
+                );
+
+                std::string label = detection.className + " " + std::to_string(static_cast<int>(detection.confidence * 100)) +"%";
+                cv::putText(
+                    frame,
+                    label,
+                    cv::Point(
+                        detection.box.x,
+                        std::max(20, detection.box.y - 10)
+                    ),
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    cv::Scalar(0, 255, 0),
+                    2
+                );
+            }
+
+            std::string objectText = "Objects: " + std::to_string(analysis.totalObjects);
+            cv::putText(
+                frame,
+                objectText,
+                cv::Point(20, 130),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.7,
+                cv::Scalar(0, 255, 0),
+                2
+            );
+
+            int y = 230;
+            for (const auto& [className, count] : analysis.objectCounts) {
+                std::string text = className + ": " + std::to_string(count);
+                cv::putText(
+                    frame,
+                    text,
+                    cv::Point(20, y),
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    cv::Scalar(0, 255, 0),
+                    2
+                );
+                y += 30;
+            }
+
+            auto currentTime = std::chrono::steady_clock::now();
+            double frameTime = std::chrono::duration<double>(
+                currentTime-previousTime).count();
+            previousTime = currentTime;
+            if (frameTime > 0) {
+                fps = 1.0 / frameTime;
+            }
+
+            cv::putText(
+                frame,
+                "AI CAMERA ANALYZER",
+                cv::Point(20, 35),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.8,
+                cv::Scalar(0, 255, 0),
+                2
+            );
+
+            std::string fpsText = "FPS: " + std::to_string(static_cast<int>(fps));
+            std::string inferenceText = "Inference: " + std::to_string(static_cast<int>(detector.getInferenceTime())) + " ms";
+            cv::putText(
+                frame,
+                fpsText,
+                cv::Point(20, 70),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.8,
+                cv::Scalar(0, 255, 0),
+                2
+            );
+            cv::putText(
+                frame,
+                inferenceText,
+                cv::Point(20, 100),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.8,
+                cv::Scalar(0, 255, 0),
+                2
+            );
+
+            std::string personText = "People: " + std::to_string(static_cast<int>(analysis.personCount));
+            std::string statusText = analysis.occupied ? "Status: OCCUPIED" : "Status: EMPTY";
+            cv::putText(
+                frame,
+                personText,
+                cv::Point(20, 160),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.7,
+                cv::Scalar(0, 255, 0),
+                2
+            );
+            cv::putText(
+                frame,
+                statusText,
+                cv::Point(20, 190),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.7,
+                cv::Scalar(0, 255, 0),
+                2
+            );
+
+            cv::imshow(windowName, frame);
+
+            int key = cv::waitKey(1);
+
+            if (key == 'q' ||
+                key == 'Q' ||
+                key == 27)
+            {
+                break;
+            }
+
+            if (cv::getWindowProperty(
+                    windowName,
+                    cv::WND_PROP_VISIBLE
+                ) < 1)
+            {
+                break;
+            }
         }
 
-        //Use right corner to quit
-        if (cv::getWindowProperty(
-                "AI Camera",
-                cv::WND_PROP_VISIBLE
-            ) < 1) {
-            break;
-        }
+        camera.release();
+        cv::destroyAllWindows();
     }
+    catch (const cv::Exception& error)
+    {
+        std::cerr
+            << "OpenCV error:\n"
+            << error.what()
+            << std::endl;
 
-    camera.release();
-    cv::destroyAllWindows();
+        return 1;
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr
+            << "Error: "
+            << error.what()
+            << std::endl;
+
+        return 1;
+    }
 
     return 0;
 }
