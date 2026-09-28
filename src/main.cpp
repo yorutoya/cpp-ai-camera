@@ -1,18 +1,27 @@
 #include <iostream>
-#include <opencv2/opencv.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 #include <chrono>
 #include "YoloDetector.hpp"
-#include <map>
+#include <algorithm>
+#include <exception>
+#include <stdexcept>
+#include <string>
+#include <vector>
 #include "CameraAnalyzer.hpp"
 
-int main()
+int main(int argc, char* argv[])
 {
     try
     {
-        YoloDetector detector(
-            "models/yolo11n.onnx"
-        );
-        CameraAnalyzer analyzer;
+        if (argc > 2) {
+            std::cerr << "Usage: ai-camera [path/to/yolo11n.onnx]\n";
+            return 1;
+        }
+        const std::string modelPath = argc == 2 ? argv[1] : "models/yolo11n.onnx";
+        YoloDetector detector(modelPath);
+        const CameraAnalyzer analyzer;
 
         cv::VideoCapture camera(0);
 
@@ -35,16 +44,13 @@ int main()
         double fps = 0.0;
 
         while (true) {
-            camera >> frame;
-
-            if (frame.empty())
-            {
-                break;
+            if (!camera.read(frame) || frame.empty()) {
+                throw std::runtime_error("Camera failed to return a frame.");
             }
 
             // AI detection
-            std::vector<Detection> detections = detector.detect(frame);
-            AnalysisResult analysis = analyzer.analyze(detections);
+            const std::vector<Detection> detections = detector.detect(frame);
+            const AnalysisResult analysis = analyzer.analyze(detections);
 
             for (const Detection& detection : detections) {
                 cv::rectangle(
@@ -134,7 +140,7 @@ int main()
                 2
             );
 
-            std::string personText = "People: " + std::to_string(static_cast<int>(analysis.personCount));
+            std::string personText = "People: " + std::to_string(analysis.personCount);
             std::string statusText = analysis.occupied ? "Status: OCCUPIED" : "Status: EMPTY";
             cv::putText(
                 frame,

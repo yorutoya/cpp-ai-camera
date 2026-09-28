@@ -1,10 +1,11 @@
 #include "YoloDetector.hpp"
-#include <iostream>
+#include <algorithm>
+#include <cmath>
+#include <opencv2/imgproc.hpp>
 #include <stdexcept>
 #include <chrono>
 
 YoloDetector::YoloDetector(const std::string &modelPath) {
-    std::cout << "Loading YOLO model..." << std::endl;
 
     net = cv::dnn::readNetFromONNX(modelPath);
     if (net.empty()) {
@@ -30,7 +31,6 @@ YoloDetector::YoloDetector(const std::string &modelPath) {
         "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
     };
 
-    std::cout << "Yolo model loaded successfully!" << std::endl;
 }
 
 cv::Mat YoloDetector::letterbox(
@@ -39,8 +39,8 @@ cv::Mat YoloDetector::letterbox(
     int& padX,
     int& padY
 ) {
-    const int inputWidth = 640;
-    const int inputHeight = 640;
+    const int inputWidth = inputSize;
+    const int inputHeight = inputSize;
 
     float scaleX =
         static_cast<float>(inputWidth) / image.cols;
@@ -48,8 +48,8 @@ cv::Mat YoloDetector::letterbox(
         static_cast<float>(inputHeight) / image.rows;
     scale = std::min(scaleX, scaleY);
 
-    int newWidth = static_cast<int>(image.cols * scale);
-    int newHeight = static_cast<int>(image.rows * scale);
+    int newWidth = std::clamp(static_cast<int>(std::round(image.cols * scale)), 1, inputWidth);
+    int newHeight = std::clamp(static_cast<int>(std::round(image.rows * scale)), 1, inputHeight);
     cv::Mat resized;
 
     cv::resize(
@@ -83,13 +83,18 @@ cv::Mat YoloDetector::letterbox(
 
 std::vector<Detection> YoloDetector::detect(const cv::Mat& frame) {
 
+    inferenceTimeMs = 0.0;
+    if (frame.empty() || frame.type() != CV_8UC3) {
+        throw std::invalid_argument("detect() requires a nonempty 8-bit BGR image.");
+    }
+
     float scale;
     int padX, padY;
     cv::Mat inputImage = letterbox(frame, scale, padX, padY);
     cv::Mat blob = cv::dnn::blobFromImage(
         inputImage,
         1.0 / 255.0,
-        cv::Size(640, 640),
+        cv::Size(inputSize, inputSize),
         cv::Scalar(),
         true,
         false
@@ -108,23 +113,27 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame) {
     inferenceTimeMs =
         std::chrono::duration<double, std::milli>(inferenceEnd - inferenceStart).count();
 
-    cv::Mat output = outputs[0];
-    cv::Mat detections(
-        output.size[1],
-        output.size[2],
-        CV_32F,
-        output.ptr<float>());
-
-    detections = detections.t();
+    // Contract: raw YOLO11 COCO detection export, batch 1, no embedded NMS.
+    const int attributes = 4 + static_cast<int>(classNames.size());
+    if (outputs.size() != 1 || outputs.front().empty()) {
+        throw std::runtime_error("Expected one nonempty YOLO detection output.");
+    }
+    const cv::Mat& output = outputs.front();
+    if (output.type() != CV_32F || output.dims != 3 ||
+        output.size[0] != 1 || output.size[1] != attributes ||
+        output.size[2] <= 0 || !output.isContinuous()) {
+        throw std::runtime_error(
+            "Expected contiguous float32 YOLO11 COCO output [1,84,N]. "
+            "Use a 640x640 detection export without embedded NMS.");
+    }
+    const cv::Mat detections = output.reshape(1, attributes).t();
 
     std::vector<cv::Rect> boxes;
     std::vector<float> confidences;
-    std::vector<float> classIds;
+    std::vector<int> classIds;
 
-    const float confidenceThreshold = 0.5f;
-    const float nmsThreshold = 0.4f;
     for (int i = 0; i < detections.rows; i++) {
-        cv::Mat classScores = detections.row(i).colRange(4, 84);
+        cv::Mat classScores = detections.row(i).colRange(4, attributes);
 
         cv::Point classIdPoint;
         double confidence;
@@ -137,36 +146,39 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame) {
             &classIdPoint
         );
 
-        if (confidence >= confidenceThreshold) {
+        if (std::isfinite(confidence) && confidence > confidenceThreshold) {
             float x = detections.at<float>(i, 0);
             float y = detections.at<float>(i, 1);
             float w = detections.at<float>(i, 2);
             float h = detections.at<float>(i, 3);
 
-            float xScale = static_cast<float>(frame.cols) / 640.0f;
-            float yScale = static_cast<float>(frame.rows) / 640.0f;
-            int left = static_cast<int>((x - w / 2.0f) * xScale);
-            int top = static_cast<int>((y - h / 2.0f) * yScale);
-            int width = static_cast<int>(w * xScale);
-            int height = static_cast<int>(h * yScale);
-
-            cv::Rect box(
-              left,
-              top,
-              width,
-              height
-            );
-
-            cv::Rect imageBounds(
-                0,
-                0,
-                frame.cols,
-                frame.rows
-            );
-            box = box & imageBounds;
-            if (box.empty()) {
+            if (!std::isfinite(x) || !std::isfinite(y) ||
+                !std::isfinite(w) || !std::isfinite(h) || w <= 0 || h <= 0) {
                 continue;
             }
+
+            // Undo centered padding first, then the uniform letterbox gain.
+            // Clip floating-point corners before converting to integer pixels.
+            const double left = std::clamp(
+                (static_cast<double>(x) - w / 2.0 - padX) / scale,
+                0.0, static_cast<double>(frame.cols));
+            const double top = std::clamp(
+                (static_cast<double>(y) - h / 2.0 - padY) / scale,
+                0.0, static_cast<double>(frame.rows));
+            const double right = std::clamp(
+                (static_cast<double>(x) + w / 2.0 - padX) / scale,
+                0.0, static_cast<double>(frame.cols));
+            const double bottom = std::clamp(
+                (static_cast<double>(y) + h / 2.0 - padY) / scale,
+                0.0, static_cast<double>(frame.rows));
+            if (right <= left || bottom <= top) {
+                continue;
+            }
+            const int x1 = static_cast<int>(std::floor(left));
+            const int y1 = static_cast<int>(std::floor(top));
+            const cv::Rect box(x1, y1,
+                static_cast<int>(std::ceil(right)) - x1,
+                static_cast<int>(std::ceil(bottom)) - y1);
             boxes.push_back(box);
 
             confidences.push_back(
@@ -177,15 +189,36 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frame) {
         }
     }
 
+    // Suppress duplicates within each class. Overlapping different objects survive.
+    // Per-class NMSBoxes also works with OpenCV versions predating NMSBoxesBatched.
     std::vector<int> indices;
-    cv::dnn::NMSBoxes(
-        boxes,
-        confidences,
-        confidenceThreshold,
-        nmsThreshold,
-        indices);
+    for (int classId = 0; classId < static_cast<int>(classNames.size()); ++classId) {
+        std::vector<cv::Rect> classBoxes;
+        std::vector<float> classConfidences;
+        std::vector<int> originalIndices;
+        for (int i = 0; i < static_cast<int>(boxes.size()); ++i) {
+            if (classIds[i] == classId) {
+                classBoxes.push_back(boxes[i]);
+                classConfidences.push_back(confidences[i]);
+                originalIndices.push_back(i);
+            }
+        }
+        if (classBoxes.empty()) {
+            continue;
+        }
+        std::vector<int> kept;
+        cv::dnn::NMSBoxes(classBoxes, classConfidences,
+            confidenceThreshold, nmsThreshold, kept);
+        for (int i : kept) {
+            indices.push_back(originalIndices[i]);
+        }
+    }
+    std::stable_sort(indices.begin(), indices.end(), [&](int a, int b) {
+        return confidences[a] > confidences[b];
+    });
 
     std::vector<Detection> results;
+    results.reserve(indices.size());
     for (int index : indices) {
         int classId = classIds[index];
         Detection detection;
